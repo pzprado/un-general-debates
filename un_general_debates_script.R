@@ -1,5 +1,5 @@
 ######################################################
-## Unsupervised Machine Learning - LDA applicarion
+## Unsupervised Machine Learning - LDA application
 ## to the United Nations General Debates dataset
 ######################################################
 

@@ -1,0 +1,672 @@
+---
+title: "United Nations General Debates: Uncovering International Political Topics through Machine Learning"
+author: "P. Prado"
+date: "07/01/2020"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: TRUE
+    
+mainfont: Helvetica Neue
+sansfont: Helvetica Neue Light
+
+abstract: "This paper analyses the United Nations (UN) General Debates dataset provided by Harvard's Dataverse with the objective to uncover the main topics discussed over the years from 1970 to 2018. The UN General Debates dataset includes documents with the yearly speeches delivered by world leaders, from which the main topics in those documents can be revealed by (i) data preprocessing and cleaning, (ii) application of Machine Learning, more specifically and mainly the LDA algorithm, and (iii) data analysis. The algorithm was set to identify 20 topics of which 12 were chosen to further this study; those were (i) Peace in Africa, (ii) War & Terrorism, (iii) Korea, (iv) Israel & Palestine, (v) Peace in Iraq, (vi) Security Council, (vii) Human Rights, (viii) European Conflicts, (ix) Nuclear Weapons, (x) South Africa & Namibia, (xi) Climate Change, and (xii) Economic Development. The time series analysis on those topics revealed trends aligned with known historical events such as the African conflicts (Independence of Namibia in 1991), Yugoslav wars, the Global Financial Crisis and Climate Change, with the latter being the most prevailing topic in the last decade. Although satisfactory results are achieved, not only in determining the topics but also in revealing the trend overtime as well as relationships between topics and continents, further improvements are still possible. This could include tuning the algorithm to find the best number of topics to the LDA algorithm input, the employment of alternative unsupervised Machine Learning algorithms such as PCA and K-means, and even a combination with supervised learning techniques such as Random Forests. The current analysis can also be expanded to combine sentiment analysis to understand the regions' - or countries' - views on the given topics."
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache = TRUE, background = '#F7F7F7', fig.align = "center", out.width = "60%")
+```
+
+
+```{r load or download required libraries, cache=FALSE}
+if (!require(knitr))
+  install.packages("knitr", repos = "http://cran.us.r-project.org")
+
+## Tidy data
+
+if (!require(tidyverse))
+  install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+
+if (!require(tidytext))
+  install.packages("tidytext", repos = "http://cran.us.r-project.org")
+
+if (!require(textdata))
+  install.packages("textdata", repos = "http://cran.us.r-project.org")
+
+if (!require(textstem))
+  install.packages("textstem", repos = "http://cran.us.r-project.org")
+
+if (!require(readtext))
+  install.packages("readtext", repos = "http://cran.us.r-project.org")
+
+if (!require(countrycode))
+  install.packages("countrycode", repos = "http://cran.us.r-project.org")
+
+if (!require(grid))
+  install.packages("grid", repos = "http://cran.us.r-project.org")
+
+if (!require(kableExtra))
+  install.packages("kableExtra", repos = "http://cran.us.r-project.org")
+
+if (!require(png))
+  install.packages("png", repos = "http://cran.us.r-project.org")
+
+## Machine learning
+
+if (!require(quanteda))
+  install.packages("quanteda", repos = "http://cran.us.r-project.org")
+
+if (!require(topicmodels))
+  install.packages("topicmodels", repos = "http://cran.us.r-project.org")
+
+## Visualisation
+
+if (!require(circlize))
+  install.packages("circlize", repos = "http://cran.us.r-project.org")
+
+if (!require(ggplot2))
+  install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+
+if (!require(gridExtra))
+  install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+
+
+```
+
+
+```{r generate-dataset in un_data}
+
+dl <- tempfile() ## download the zip file to a temporary location
+download.file(
+  "https://github.com/pzprado/un-general-debates/raw/master/UNGDC+1970-2018.zip",
+  dl
+)
+
+unzip(dl, exdir = paste0(getwd(), '/UN_data'), overwrite = TRUE) ## unzip the file
+undir <- paste0(getwd(), '/UN_data') ## point to the directory of the files
+
+un_files <- ## generate the dataset
+  readtext(
+    paste0(undir, "/Converted sessions/*/*.txt"),
+    docvarsfrom = "filenames",
+    docvarnames = c("country", "session", "year"),
+    dvsep = "_",
+    encoding = "UTF-8"
+)
+
+un_data <- ## consolidate the master dataset with country names and continent
+  un_files %>%
+  mutate(
+    country_name = countrycode(
+      sourcevar = un_files$country,
+      origin = 'iso3c',
+      destination = 'iso.name.en'
+    ),
+    continent = countrycode(
+      sourcevar = un_files$country,
+      origin = 'iso3c',
+      destination = 'continent'
+    )
+  ) %>%
+  select(doc_id, text, country, country_name, continent, session, year)
+
+## fixing NA due to no match for YDYE, CSK, YUG, DDR and EU in the countrycode package
+
+un_data[un_data$country == 'YDYE', "country_name"] <- "Yemen, Democratic"
+un_data[un_data$country == 'YDYE', "continent"] <- "Asia"
+
+un_data[un_data$country == 'CSK', "country_name"] <- "Czechoslovakia"
+un_data[un_data$country == 'CSK', "continent"] <- "Europe"
+
+un_data[un_data$country == 'YUG', "country_name"] <- "Yugoslavia"
+un_data[un_data$country == 'YUG', "continent"] <- "Europe"
+
+un_data[un_data$country == 'DDR', "country_name"] <- "East Germany"
+un_data[un_data$country == 'DDR', "continent"] <- "Europe"
+
+un_data[un_data$country == 'EU', "country_name"] <- "European Union"
+un_data[un_data$country == 'EU', "continent"] <- "Europe"
+
+un_data$doc_id <- sub(".txt", "", un_data$doc_id) ## fix the doc_id pattern
+
+#rm(dl, undir, un_files) ## keep the environment clean
+
+```
+
+
+# Introduction
+
+The United Nations (UN) General Debates are held every year as part of the yearly General Assembly meeting. On this occasion, world leaders gather together to discuss and share their views on topics that affect the world, coutries and entities they represent. The opening statement from each leader is made available in the United Nations General Debates dataset.^[Jankin Mikhaylov, Slava; Baturo, Alexander; Dasandi, Niheer, 2017, "United Nations General Debate Corpus", https://doi.org/10.7910/DVN/0TJX8Y, Harvard Dataverse, V5] The dataset contains the documented speeches for the period from 1970 to 2018 which is valuable in understanding how the countries concerns - or international political agenda - varied over time. 
+
+The goal of this study is to apply Machine Learning techniques to uncover the topics discussed in the UN General Debates documents, a task that otherwise would require extensive human resources to read and categorise them. The process of Unsupervised Machine Learning, also referred to as Topic Modelling, together with robust data analysis allows to answer questions such as: (i) which topics dominated the debates over the 49-year period and (ii) the relationship between topics and continents. 
+
+
+# Method and Analysis
+
+Natural Language Processing (NLP) involves the challenge of analysing unstratuctured data. As such, the key steps in this study are the data preprocessing and cleaning, the transformation of the texts into word tokens, the application of Machine Learning algorithms and the visualisation of the correlated data. While seemingly simple, there is extensive work required particularly in data cleaning and preprocessing as well as the implementation of the Latent Dirichlet Allocation (LDA) algorithm to identify topics, tasks that may result in a few hours of computation processing time.
+
+## _Exploration_
+
+The UN General Debates dataset contains 8,093 opening statements from the world leaders that attend the annual meeting. A look at the dataset shows the following information:
+
+```{r un_data summary}
+
+class(un_data)
+glimpse(un_data)
+
+```
+
+A full summary is provided with the code below, demonstrating that the dataset comprises statements from 1970 to 2018. 
+
+```{r un-data-stats, echo = TRUE}
+
+un_data.stats <- summary(un_data)
+un_data.stats
+
+```
+
+Another summary can be made focusing on the number of unique documents, countries and continents. The 8,093 opening statements were delivered by 200 world leaders in 5 continents over the 49-year period of the dataset.
+
+```{r unique-numbers}
+
+un_data %>%
+  summarise(
+  documents = n_distinct(doc_id),
+  years = n_distinct(year),
+  countries = n_distinct(country),
+  continents = n_distinct(continent)
+  )
+
+```
+
+It is worth noting that the General Debates in 2018 included 196 countries/documents (193 UN country members, the European Union and the observer states of the Holy See and the State of Palestine) as seen in the extract below. This number is lower than 200 countries in the data set, which derives from the political changes that resulted in the merger or separation of countries (e.g. Yugoslavia) over time.
+
+```{r 2018-unique-numbers}
+
+un_data %>%
+  filter(year == '2018') %>%
+  group_by(year) %>%
+  summarise(
+  documents = n_distinct(doc_id),
+  countries = n_distinct(country),
+  continents = n_distinct(continent)
+  )
+
+```
+
+
+## _Data preprocessing and analysis_
+
+The `un_data` dataset is a data frame object which is not the best to analyse text data. The corpus data class is widely utilised in Natural Language Processing (NLP) therefore the dataset conversion is the first step. The preprocessing tasks in this study are:
+
+1. Corpus conversion;
+2. Lemmatisation;
+3. Tokenization; and
+4. Cleaning.
+
+The steps are briefly described below:
+
+### Step 1: Corpus conversion
+
+The conversion of data frame into corpus is done with the package `quanteda` with a simple line of code as demonstrated below.
+
+```{r step-1-convert-corpus, echo = TRUE}
+
+un_corpus <- corpus(un_data, text_field = "text")
+class(un_corpus)
+
+```
+
+Now with a corpus object, the summary provides a lot more information, already containing data such as the number of tokens (words) and sentences per document.
+
+
+```{r corpus-summary}
+summary(un_corpus, n = 5) 
+
+```
+
+From the number of tokens and sentences it is possible to see how the length of the speeches changed over time. The plots below, a similar trend can be observed between the length and number of speeches delivered by world leaders in each year. With the increase of country members, the UN has likely implemented measures to limit the time that each country had to deliver their speech.
+
+```{r speeches-plots, fig.show = "hold", out.width = "40%", fig.height = 4}
+
+un_corpus.stats <- as.data.frame(summary(un_corpus, n = 8093))
+
+tokens_plot <- un_corpus.stats %>% 
+  group_by(year, continent) %>% 
+  summarize(tokens = mean(Tokens)) %>% 
+  ggplot(aes(year, tokens, color = continent)) + 
+  geom_smooth(method = 'loess', fill = 'NA') +
+  theme(legend.position = "top") +
+  ggtitle('Average speech tokens per continent') +
+  labs(color = NULL)
+
+sentence_plot <- un_corpus.stats %>% group_by(year, continent) %>% 
+  summarize(sentences = mean(Sentences)) %>% 
+  ggplot(aes(year, sentences, color = continent)) + 
+  geom_smooth(method = 'loess', fill = 'NA') + 
+  theme(legend.position = "none") +
+  ggtitle('Average speech sentences per continent')
+
+
+speeches_plot <- un_corpus.stats %>% 
+  group_by(year) %>% 
+  summarize(countries = n_distinct(country)) %>% 
+  ggplot(aes(year, countries)) + 
+  geom_smooth(method = 'loess', fill = 'NA') +
+  ggtitle('Speeches per year')
+
+#grid.arrange(tokens_plot, sentence_plot, speeches_plot, nrow = 3)
+tokens_plot
+sentence_plot
+speeches_plot
+
+```
+
+
+### Step 2: Lemmatisation
+
+The analysis of text data requires grouping words found in texts. However, grouping exact matches within a text would not yield good results in topic modelling due to the inflection of words (e.g. consulting, consultant, consultation). There are many approaches to solving this problem but the most popular ones are Stemming and Lemmatisation. 
+In short, Stemming stands for "cutting" part of the word to reach its root. In this case, "consulting" and "consultant" would be reduced to "consult". On the other hand, Lemmatisation looks at the morphological meaning of the word, as defined in the Cambridge Dictionary:
+
+>_the process of reducing the different forms of a word to one single form, for example, reducing "builds", "building", or "built" to the lemma "build":_
+
+>* _Lemmatization is the process of grouping inflected forms together as a single base form._
+>* _In dictionaries, there are fixed lemmatization strategies._
+
+Each approach has advantages and disadvantages. Stemming is a faster process but the results may not be as realiable, for instance, "popular" and "population" would become "popula". Lemmatisation, on the other hand, preserves better meaning of the words albeit the processing time being extremely long. In this study, the latter has been used.
+
+```{r step-2-lemmatisation, echo = TRUE}
+
+un_corpus_lemma <- # create a new corpus to preserve the original corpus
+  corpus(un_data, text_field = "text") 
+
+start <- Sys.time()
+
+un_corpus_lemma$documents$texts <-
+  lemmatize_strings(un_corpus_lemma$documents$texts, dictionary = lexicon::hash_lemmas)
+
+Sys.time()-start
+
+```
+
+The processing time is indicated above as the "Time difference" between start and end of the Lemmatisation.
+
+### Step 3: Tokenization
+
+Up to now, the text data is stored in documents as strings, that is, the text for each document is a single string. Tokenization - in NLP - is the process of splitting the strings into separate words (or tokens). This process will still keep the tokens allocated to each document in the corpus.
+
+```{r step-3-tokenization, echo = TRUE}
+
+un_tokens <-
+  quanteda::tokens(
+    un_corpus_lemma
+  )
+
+```
+
+
+A high level look into the results below already indicates why cleaning is important in this study. The tables below show the top 10 and bottom 10 terms.
+
+```{r dirty-tokens}
+
+top_terms.d <-
+  un_tokens %>% dfm() %>% tidy() %>% group_by(term) %>% 
+  summarize(count = n()) %>% arrange(desc(count)) %>% slice(1:10) 
+
+bot_terms.d <-
+  un_tokens %>% dfm() %>% tidy() %>% group_by(term) %>% 
+  summarize(count = n()) %>% arrange(count) %>% slice(1:10)
+
+top_terms.d 
+bot_terms.d
+
+```
+
+### Step 4: Cleaning
+
+In this step, the objective is to transform all tokens into lowercase and eliminate tokens that are symbols, URLs, punctuation, stopwords, numbers and hyphens. The `quanteda` package is used for lowercase transformation and removal of stopwords, however it must be done by transforming the object into a Data Feature Matrix. The result shows an improvement as noted below.
+
+```{r step-4-cleaning}
+un_words <- c("unite", "nation", "country", "international", 
+              "united", "nations", "countries", "will", "world")
+
+un_tokens <-
+  quanteda::tokens(
+    un_corpus_lemma,
+    remove_numbers = TRUE,
+    remove_twitter = TRUE,
+    remove_punct = TRUE,
+    remove_symbols = TRUE,
+    remove_url = TRUE,
+    remove_hyphens = TRUE,
+    include_docvars = TRUE
+  )
+
+un_dfm <- 
+  dfm(un_tokens,
+             tolower = TRUE,
+             stem = FALSE,
+             remove = c(stopwords("english"),
+                        un_words
+                        )
+  )
+
+
+top_terms.cl <-
+  un_dfm %>% tidy() %>% group_by(term) %>% 
+  summarize(count = n()) %>% arrange(desc(count)) %>% slice(1:10) 
+
+bot_terms.cl <-
+  un_dfm %>% tidy() %>% group_by(term) %>% 
+  summarize(count = n()) %>% arrange(count) %>% slice(1:10)
+
+top_terms.cl
+bot_terms.cl
+
+```
+
+Cleaning can still be improved by (i) trimming the words rarely occurred and (ii) removing words that do not add value to topic modelling. In the first case (i), as seen below, a few words have numbers instead of letters such as "0ctober" and "0n" due to the processing of the texts stored as image files prior to 1992 (Baturo et al. 2017). In the second case (ii), the words "nation", "unite", "international", "country" and "world" are amongst the most frequent ones as they directly relate to the United Nations, therefore also not adding value to topic modelling.
+
+The trimming can be done to remove very low occurrences. Removing the bottom 0.002% yields the following result:
+
+```{r dfm-trimming}
+
+un_dfm <- dfm_trim(un_dfm,
+                   min_docfreq = 0.002,
+                   docfreq_type = "prop"
+                   ) 
+
+top_terms.tr <-
+  un_dfm %>% tidy() %>% group_by(term) %>% 
+  summarize(count = n()) %>% arrange(desc(count)) %>% slice(1:10) 
+
+bot_terms.tr <-
+  un_dfm %>% tidy() %>% group_by(term) %>% 
+  summarize(count = n()) %>% arrange(count) %>% slice(1:10)
+
+top_terms.tr
+bot_terms.tr
+
+```
+
+A word cloud plot helps visualise the frequency of the top words comparatively. The size of the words represent their frequency.
+
+```{r total-wordcloud}
+
+un_dfm %>% textplot_wordcloud()
+
+```
+
+
+## _LDA_
+
+There are various Machine Learning algorithms that can be applied in NLP. This study utilises the Latent Dirichlet Allocation (LDA) algorithm for topic modelling introduced by Blei et al. (2003). It was chosen due to its frequent use in unsupervised learning within NLP. There is extensive technical explanation about LDA in the referenced publication, therefore this study will briefly explain how fitting the model works.
+
+A known limitation of the LDA algorithm is that the number of topics (or clusters) need to be specified upfront. In the case of the UN General Debates this can mean losing relevant insights. For now, the target will be to identify 20 topics.^[20 was arbitrarily determined.]
+
+To fit the model, the parameters below are specified into the code that follows:
+
+* _k_ for the number of topics
+* _seed_ for the replication of the results
+* _method_ for the sampling method^[This LDA application utilised the method Gibbs for sampling (Resnik and Hardisty 2010).]
+
+
+```{r LDA-fit, echo = TRUE}
+
+un_dtm <- convert(un_dfm, to = "topicmodels")
+k <- 20 #number of topics
+seed = 123 #necessary for reproducibility
+
+start <- Sys.time() #calculating the total runtime
+lda <- LDA(un_dtm, k = k, method = "GIBBS", control = list(seed = seed))
+Sys.time()-start # total runtime between end and start of LDA processing
+
+```
+
+The "time difference" shown above indicates, again, how long it took for the LDA function to be processed.
+
+There are many other parameters that can be adjusted within the LDA function of the code, those include the samples to discard, iterations, etc. Those were not adjusted in this study in order to assess the performance of a standard application of the algorithm to the UN General Debates dataset. 
+
+# Results
+
+## Topics
+
+The following is a result of the 20 topics found within the 8,093 documents withe the 15 most relevant words that form the topic.
+
+```{r LDA-output}
+
+as.data.frame(terms(lda, 15)) %>% 
+  select(1:10) %>% 
+  kable(format = "latex") %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+as.data.frame(terms(lda, 15)) %>% 
+  select(11:20) %>% 
+  kable(format = "latex") %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+```
+
+As seen above, a few topics do not provide much meaning by looking at the first 15 words. This is because, certainly, a lot of the documents make reference to the General Assembly of the UN and some general purposes of the UN as an organisation itself. Therefore, a few topics are separated below to proceed further in the study, those are:
+
+* Topic 1: Peace in Africa
+* Topic 2: War & Terrorism
+* Topic 3: Korea
+* Topic 4: Israel & Palestine
+* Topic 6: Peace in Iraq
+* Topic 8: Security Council
+* Topic 10: Human Rights
+* Topic 12: European Conflicts
+* Topic 13: Nuclear Weapons
+* Topic 14: South Africa & Namibia
+* Topic 16: Climate Change
+* Topic 17: Economic Development
+
+The reduction from 20 to 12 topics shall facilitate the visualisation of topic trends and topic relationships.
+
+
+```{r study-topics}
+
+study_topics <- c(1, 2, 3, 4, 6, 8, 10, 12, 13, 14, 16, 17
+                  )
+
+topic_names <- c('Peace in Africa', 
+  'War & Terrorism', 
+  'Korea', 
+  'Israel & Palestine', 
+  'Peace in Iraq',
+  'Security Council', 
+  'Human Rights', 
+  'European Conflicts', 
+  'Nuclear Weapons',
+  'South Africa & Namibia',
+  'Climate Change', 
+  'Economic Development')
+
+df_topics <- data.frame(name = topic_names, topic = study_topics)
+
+```
+
+
+## _Topic trends_
+
+With the topics already generated, it is possible to start analysing relationships between topics, year, continents and even countries.^[Country analysis is excluded from this study.] 
+
+This is possible because LDA not only generated the topics found in the documents (based on the combination of words) but also created the probabilities of each topic within each document.
+
+This probability is referred to as gamma $\gamma$.
+
+```{r topic-year-plot}
+
+#Extract gamma, join metadata, create average gamma
+year_topic_relationship <- tidy(lda, matrix = "gamma") %>%
+  inner_join(un_data, by = c("document" = "doc_id")) %>%
+  select(year, topic, gamma) %>%
+  group_by(year, topic) %>%
+  summarize(gamma = mean(gamma))
+
+year_topic_relationship %>% 
+  filter(topic %in% study_topics) %>%
+  inner_join(df_topics, by = "topic") %>%
+  ggplot(aes(x = year, y = gamma, colour = factor(name))) + 
+  geom_line(size = 1.5) + 
+  scale_color_brewer(palette = "Paired") +
+  labs(colour = NULL)
+
+```
+
+From the plot above, the probability of the topics being debated by the UN can be directly attributed to historical facts, such as:
+
+* Topic 17: Economic Development peaked between 2005-2010, correlating to the Global Financial Crisis of 2007-2008
+* Topic 12: European Conflicts peaked between 1990-1995, correlating to the Yugoslav wars between 1991-2001
+* Topic 14: South Africa & Namibia peaked between 1975-1980 remaining high during 1980s, correlating to the South African Border War between 1966-1989 and Namibia's Independence in 1990
+* Topic 6: Peace in Iraq peaked between 2010-2015, correlating to the Iraq War between 2003-2011
+
+Those are just a few. As observed in the plots above, the Topic 16: Climate Change, has the most notable increase over recent years. Based on this data it is possible to conclude that Climate Change has been prevailing in the UN General Debates since 2010.
+
+Representing 12 topics visually is still a lot, therefore, the continent-topic relationship is shown below only in relation to the 5 topics discussed above.
+
+```{r topic-continent-plot, dev="png", out.width="100%", dpi=600, fig.show="hide"}
+
+topics.5 <- c(6, 12, 14, 16, 17)
+
+#Extract gamma, join metadata, create average gamma
+continent_topic_relationship <- tidy(lda, matrix = "gamma") %>%
+  filter(topic %in% topics.5) %>%
+  inner_join(un_data, by = c("document" = "doc_id")) %>%
+  select(continent, topic, gamma) %>%
+  group_by(continent, topic) %>%
+  summarize(gamma = mean(gamma))
+
+grid.col = c("Americas" = "blue", "Asia" = "yellow", "Europe" = "red",
+             "Africa" = "green", "Oceania" = "brown", "6" = "grey", "12" = "grey",
+             "14" = "grey", "16" = "grey", "17" = "grey")
+
+circos.clear()
+
+circos.par(gap.after = c(rep(5, length(unique(continent_topic_relationship[[1]])) - 1), 15,
+                         rep(5, length(unique(continent_topic_relationship[[2]])) - 1), 15))
+
+# ChordDiagram (Continent topic relationship)
+
+chordDiagram(continent_topic_relationship, grid.col = grid.col)
+title("All Time Topic and Continent Relationship")
+grid.text("  6 Peace & Iraq
+12 European Conflicts
+14 South Africa & Namibia
+16 Climate Change
+17 Economic Development", 
+          x=unit(0.05, "npc"), y=unit(0.8, "npc"), just="left",
+          gp=gpar(fontsize=8))
+
+continent_topic_relationship <- tidy(lda, matrix = "gamma") %>%
+  inner_join(un_data, by = c("document" = "doc_id")) %>%
+  filter(topic %in% topics.5, year == "1990") %>%
+  select(continent, topic, gamma) %>%
+  group_by(continent, topic) %>%
+  summarize(gamma = mean(gamma))
+
+circos.clear()
+
+circos.par(gap.after = c(rep(5, length(unique(continent_topic_relationship[[1]])) - 1), 15,
+                         rep(5, length(unique(continent_topic_relationship[[2]])) - 1), 15))
+
+chordDiagram(continent_topic_relationship,  grid.col = grid.col)
+title("Topic and Continent Relationship in 1990")
+
+continent_topic_relationship <- tidy(lda, matrix = "gamma") %>%
+  inner_join(un_data, by = c("document" = "doc_id")) %>%
+  filter(topic %in% topics.5, year == "2000") %>%
+  select(continent, topic, gamma) %>%
+  group_by(continent, topic) %>%
+  summarize(gamma = mean(gamma))
+
+circos.clear()
+
+circos.par(gap.after = c(rep(5, length(unique(continent_topic_relationship[[1]])) - 1), 15,
+                         rep(5, length(unique(continent_topic_relationship[[2]])) - 1), 15))
+
+chordDiagram(continent_topic_relationship,  grid.col = grid.col)
+title("Topic and Continent Relationship in 2000")
+
+continent_topic_relationship <- tidy(lda, matrix = "gamma") %>%
+  inner_join(un_data, by = c("document" = "doc_id")) %>%
+  filter(topic %in% topics.5, year == "2018") %>%
+  select(continent, topic, gamma) %>%
+  group_by(continent, topic) %>%
+  summarize(gamma = mean(gamma))
+
+circos.clear()
+
+circos.par(gap.after = c(rep(5, length(unique(continent_topic_relationship[[1]])) - 1), 15,
+                         rep(5, length(unique(continent_topic_relationship[[2]])) - 1), 15))
+
+chordDiagram(continent_topic_relationship,  grid.col = grid.col)
+title("Topic and Continent Relationship in 2018")
+
+
+
+```
+
+```{r chord-diagrams, out.width="100%"}
+
+fig1 <-
+  rasterGrob(as.raster(readPNG(
+    paste0(
+      getwd(),
+      '/un_general_debates_report_files/figure-latex/topic-continent-plot-1.png'
+    )
+  )), interpolate = FALSE)
+
+fig2 <-
+  rasterGrob(as.raster(readPNG(
+    paste0(
+      getwd(),
+      '/un_general_debates_report_files/figure-latex/topic-continent-plot-2.png'
+    )
+  )), interpolate = FALSE)
+
+fig3 <-
+  rasterGrob(as.raster(readPNG(
+    paste0(
+      getwd(),
+      '/un_general_debates_report_files/figure-latex/topic-continent-plot-3.png'
+    )
+  )), interpolate = FALSE)
+
+fig4 <-
+  rasterGrob(as.raster(readPNG(
+    paste0(
+      getwd(),
+      '/un_general_debates_report_files/figure-latex/topic-continent-plot-4.png'
+    )
+  )), interpolate = FALSE)
+
+# Organise the grid
+grid.arrange(fig1, fig2, fig3, fig4, ncol = 2)
+
+```
+
+
+
+While the continents' relationship with the Climate Change topic is somewhat homogeneous (particularly in 2018), other topics have a clear stronger relationship to the continent where such topic has initially emerged. The relationships are:
+
+* Economic Development and the Americas
+* European Conflicts and Europe
+* Peace in Iraq and Asia
+* South Africa & Namibia and Africa.
+
+# Conclusion
+
+The UN General Debates dataset is extremely valuable in providing insights about international politics. In this study, the application of Unsupervised Machine Learning via the LDA algorithm proved effective in uncovering the main topics and their trends. Some of the identified topics related to historic events of regional wars, economic development and other international issues. According to those results, the most prevalent topic of the of the past decade is Climate Change. It reached the highest probability - over 20% - recorded for the analysed period, followed by the topics related to South Africa & Namibia and European Conflicts.
+
+In terms of expanding this study, possible improvements include the benchmarking of other topic modelling algorithms such as PCA and K-means. This work can be further developed via the application of supervised learning techniques and the addition of sentiment analysis which produce invaluable insights in understanding the countries perspectives on certain matters. Lastly, such understanding of countries perspectives would allow to conclude whether countries within the same continent discuss the same topics.
+
+# References
+
+Alexander Baturo, Niheer Dasandi, and Slava Mikhaylov, "Understanding State Preferences With Text As Data: Introducing the UN General Debate Corpus" Research & Politics, 2017.
+
+Blei DM, Ng AY, Jordan MI. 2003. Latent Dirichlet Allocation. Journal of Machine Learning Research. 3 (4–5):993–1022.
+
+Resnik P, Hardisty E. 2010. Gibbs sampling for the uninitiated. Technical Report UMIACS-TR-2010-04, University of Maryland. http://drum.lib.umd.edu//handle/1903/10058.
+
